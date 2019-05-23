@@ -22,8 +22,8 @@ static ranlux48 generator;
 
 #define nemax (4*N)
 
-static int rseed = 1;
-static unsigned long long int mcSteps = N*30;
+static int rseed = 2;
+static unsigned long long int mcSteps = N*3000;
 static double t=0.001;
 static int energy;
 static double eAverage=0,e2Average=0;
