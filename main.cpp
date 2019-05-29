@@ -8,7 +8,7 @@
 #include <bitset>
 
 using namespace std;
-static ranlux48 generator;
+static default_random_engine generator;
 
 #define L 100
 #define N L*L
@@ -22,7 +22,7 @@ static ranlux48 generator;
 
 #define nemax (4*N)
 
-static int rseed = 2;
+static int rseed = 1;
 static unsigned long long int mcSteps = N*3000;
 static double t=0.001;
 static int energy;
@@ -59,11 +59,18 @@ struct postype {
     int i,j;
 };
 
+struct simpleEM {
+    int E;
+    int M;
+};
+
 static signed char s[N]; // spin values over all system
 static int neigh[N*NEIGHBOURS];
 
-static vector< vector< Etype > > states; // access as states[c][i].{E|M|states[j]}
-// where i or j are simply iterators, c - configuration over surrounding spins
+static vector< vector <simpleEM> > states; //access through states[b][i].{E|M}
+// where b is bit-typed configuration of border, i - sequential configuration of kernel;
+
+static vector< int > minimalEnergies; // array of minimal energies of kernel grouped by border.
 
 static vector<pairtype> pairmask; // mask for all pair interactions counting from top left corner of core spin
 static postype borderpos[BORDER_N];
@@ -86,7 +93,6 @@ inline int block_getj(int _n){return _n%BORDER_L;}
 void mc();
 void step();
 void single();
-void singleGroup(unsigned long long currStep);
 void showLocSys(signed char *locs, size_t LL);
 
 void spinset(){
@@ -148,15 +154,17 @@ void gatherConf(){
     const int borderConfigMax=1<<BORDER_N, kernelConfigMax=1<<KERNEL_N;
 
     states.resize(borderConfigMax);
+    minimalEnergies.resize(borderConfigMax,99999);
 
-    signed char locs[BLOCK_N];
-
-    vector< Etype >::iterator findIt;
+    signed char locs[BLOCK_N]; // local lattice of spins, with borders
 
     int index = 0;
     uint tempBorderConfigNum=0, tempKernelConfigNum=0, kernelConfigNum=0;
     int totalM, tempM, tempE;
-    for (uint borderConfigNum=0; borderConfigNum<borderConfigMax; ++borderConfigNum ){ //enumerate surroundings
+
+    //enumerate surroundings
+    for (uint borderConfigNum=0; borderConfigNum<borderConfigMax; ++borderConfigNum ){
+        states[borderConfigNum].resize(kernelConfigMax);
         totalM=0;
         //fill config bits in array
         tempBorderConfigNum=borderConfigNum;
@@ -168,7 +176,8 @@ void gatherConf(){
             tempBorderConfigNum = tempBorderConfigNum>>1;
         }
 
-        for ( kernelConfigNum=0; kernelConfigNum < kernelConfigMax; ++kernelConfigNum ){ // enumerate configs
+        // enumerate configs
+        for ( kernelConfigNum=0; kernelConfigNum < kernelConfigMax; ++kernelConfigNum ){
             tempM=totalM;
             tempKernelConfigNum=kernelConfigNum;
             //fill the center square
@@ -190,12 +199,11 @@ void gatherConf(){
             tempE *= -J;
 
             //add value to dataset
-            findIt = find(states[borderConfigNum].begin(),states[borderConfigNum].end(),Etype(tempE));
-            if (findIt!=states[borderConfigNum].end()){
-                (*findIt).states.push_back(kernelConfigNum);
-            } else {
-                states[borderConfigNum].push_back(Etype(tempE,kernelConfigNum));
-            }
+            states[borderConfigNum][kernelConfigNum] = {tempE,tempM};
+
+            // store the minimal energy
+            if (tempE < minimalEnergies[borderConfigNum])
+                minimalEnergies[borderConfigNum] = tempE;
         }
     }
 }
@@ -210,7 +218,7 @@ void energyset(){
     energy *= J*-0.5;
 }
 
-uint getEdgesConf(const int di, const int dj){
+uint getBorderConf(const int di, const int dj){
     uint tempC=0, tbit;
     for (int i=BORDER_N-1; i>=0; --i){
         tbit = (s[idx(pbc(borderpos[i].i+di),pbc(borderpos[i].j+dj))]==-1)?0:1;
@@ -275,111 +283,116 @@ void mc()
 {
     unsigned long long int n;
 
-    for( n = 0; n <= mcSteps; ++n){
-        singleGroup(n+1);
-    }
-}
+    uint totalKernelConfigs=1<<KERNEL_N;
 
-void singleGroup(unsigned long long int currStep)
-/*   group spin flip */
-{
     int coreI, coreJ;
+    size_t coreSpin;
+    uniform_int_distribution<size_t> selectSpinRandom(0,N-1);
 
-    int eShift=0, i=0;
+    uint kernelConfigNum;
 
-    coreI = lrand48()%(L);
-    coreJ = lrand48()%(L);
+    double *probs = new double[totalKernelConfigs];
 
-    // получаем конфигурацию ядра
-    uint oldKernelConfig=getKernelConf(coreI,coreJ);
-    uint borderConfig = getEdgesConf(coreI,coreJ);
+    for( n = 0; n <= mcSteps; ++n){
 
-    // вычисляем сдвиг энергии
-    Etype *currE = nullptr;
-    double minLocE=states[borderConfig][0].E;
-    for (Etype &stateGroup: states[borderConfig]){
 
-        vector <uint>::iterator findIt = find(
-                    stateGroup.states.begin(),
-                    stateGroup.states.end(), oldKernelConfig);
-        if (findIt != stateGroup.states.end()){
-            currE = &stateGroup;
-            //break;
+        int eShift=0, i=0;
+
+        coreSpin = selectSpinRandom(generator);
+        coreI = geti(coreSpin);
+        coreJ = getj(coreSpin);
+
+        // get configurations of kernel and border
+        uint oldKernelConfig=getKernelConf(coreI,coreJ);
+        uint borderConfig = getBorderConf(coreI,coreJ);
+
+
+        eShift = energy - states[borderConfig][oldKernelConfig].E;
+
+
+        /*energyset();
+        if (eShift+currE->E != energy){
+            cout<<"E error again~!"<<endl;
+        }*/
+
+        //строим локальную статсумму
+        double eAverageLoc=0,e2AverageLoc=0, eAverageLocGlob=0, e2AverageLocGlob=0;//попутно считаем средние параметры
+        double probsSumm=0;
+        for (uint kernelConfigNum=0; kernelConfigNum<totalKernelConfigs; ++kernelConfigNum){
+            probs[kernelConfigNum] = exp(-(states[borderConfig][kernelConfigNum].E-minimalEnergies[borderConfig])/t);
+            probsSumm += probs[kernelConfigNum];
+
+            eAverageLoc += states[borderConfig][kernelConfigNum].E*probs[kernelConfigNum];
+            e2AverageLoc += states[borderConfig][kernelConfigNum].E*states[borderConfig][kernelConfigNum].E*probs[kernelConfigNum];
         }
-        if (stateGroup.E < minLocE)
-            minLocE = stateGroup.E;
-    }
-    if (currE == nullptr){
-        cout<<"ERROR! I can't find kernel config for desired border config"<<endl;
-    }
+        eAverageLoc  /= probsSumm;
+        e2AverageLoc /= probsSumm;
 
-    eShift = energy - currE->E;
-    /*energyset();
-    if (eShift+currE->E != energy){
-        cout<<"E error again~!"<<endl;
-    }*/
-
-    //строим локальную статсумму
-    double eAverageLoc=0,e2AverageLoc=0;//попутно считаем средние параметры
-    double *probs = new double[states[borderConfig].size()];
-    double probsSumm=0;
-    i=0;
-    for (Etype &stateGroup: states[borderConfig]){
-        probs[i] = stateGroup.states.size()*exp(-(stateGroup.E-minLocE)/t);
-        probsSumm += probs[i];
-
-        eAverageLoc += (eShift+stateGroup.E)*probs[i];
-        e2AverageLoc += (eShift+stateGroup.E)*(eShift+stateGroup.E)*probs[i];
-
-        ++i;
-    }
-    eAverageLoc  /= probsSumm;
-    e2AverageLoc /= probsSumm;
+        eAverageLocGlob  = eShift + eAverageLoc;
+        e2AverageLocGlob = eShift*eShift + 2*eShift*eAverageLoc + e2AverageLoc;
 
 
-    // обновляем итоговые параметры
-    eAverage  = eAverage  + (eAverageLoc  - eAverage )/currStep;
-    e2Average = e2Average + (e2AverageLoc - e2Average)/currStep;
+        // Update total averages (sliding average value)
+        eAverage  = eAverage  + (eAverageLocGlob  - eAverage )/(n+1);
+        e2Average = e2Average + (e2AverageLocGlob - e2Average)/(n+1);
 
 
 
-    // выбираем нового кандидата
-    //сперва выбрали энергию согласно вероятности
-    uniform_real_distribution<double> realDistribution(0,probsSumm);
-    double rval = realDistribution(generator);
-    double tval=0;
-    size_t currEGroup;
-    for (currEGroup=0; currEGroup<states[borderConfig].size(); ++currEGroup){
-        if (rval>=tval && rval<tval+probs[currEGroup]){
-            break;
-        } else {
-            tval+=probs[currEGroup];
+        // выбираем нового кандидата
+        uniform_real_distribution<double> realDistribution(0,probsSumm);
+        double rval = realDistribution(generator);
+        double tval=0;
+        for (kernelConfigNum=0; kernelConfigNum<totalKernelConfigs; ++kernelConfigNum){
+            if (rval>=tval && rval<tval+probs[kernelConfigNum]){
+                break;
+            } else {
+                tval+=probs[kernelConfigNum];
+            }
         }
-    }
-    if (currEGroup==states[borderConfig].size()){
-        cout<<"ERROR! None of energies were choosen due to randomness, check this place!"<<endl;
-        currEGroup-=1;
-    }
+        setKernelConf(kernelConfigNum,coreI,coreJ);
+        energy = eShift+states[borderConfig][kernelConfigNum].E;
 
-    //затем выбираем одну конфигурацию из группы и применяем её
-    uniform_int_distribution<size_t> intDistribution(0,states[borderConfig][currEGroup].states.size()-1);
-    setKernelConf(states[borderConfig][currEGroup].states[intDistribution(generator)],coreI,coreJ);
 
-    energy = eShift+states[borderConfig][currEGroup].E;
+        /*
+        //сперва выбрали энергию согласно вероятности
+        uniform_real_distribution<double> realDistribution(0,probsSumm);
+        double rval = realDistribution(generator);
+        double tval=0;
+        size_t currEGroup;
+        for (currEGroup=0; currEGroup<states[borderConfig].size(); ++currEGroup){
+            if (rval>=tval && rval<tval+probs[currEGroup]){
+                break;
+            } else {
+                tval+=probs[currEGroup];
+            }
+        }
+        if (currEGroup==states[borderConfig].size()){
+            cout<<"ERROR! None of energies were choosen due to randomness, check this place!"<<endl;
+            currEGroup-=1;
+        }
+
+        //затем выбираем одну конфигурацию из группы и применяем её
+        uniform_int_distribution<size_t> intDistribution(0,states[borderConfig][currEGroup].states.size()-1);
+        setKernelConf(states[borderConfig][currEGroup].states[intDistribution(generator)],coreI,coreJ);
+
+        energy = eShift+states[borderConfig][currEGroup].E;*/
+    }
     delete[] probs;
-    //cout<<energy<<" ";
-    //energyset();
-    //cout<<energy<<endl;
 }
 
 int main(int argc, char *argv[])
 {
     //cout<<mcSteps<<endl;
-    if (argc!=2){
-        cout<<"error console parameter. Input T (>0 and <10)";
+    if (argc!=3){
+        cout<<"error reading console parameters."<<endl;
+        cout<<"The format is as follows:"<<endl;
+        cout<<argv[0]<<" <T> <rseed>"<<endl;
+        cout<<"\t<T> - temperature, real number (>0 and <10)"<<endl;
+        cout<<"\t<rseed> - random seed, integer (>1)"<<endl;
         return 0;
     }
     t = stod(argv[1]);
+    rseed = stoi(argv[2]);
 
 
     generator.seed(rseed);
@@ -394,7 +407,7 @@ int main(int argc, char *argv[])
     //cout<<energy<<endl;
     mc();
 
-    cout<<t<<"\t"<<eAverage<<"\t"<<e2Average<<endl;
+    cout<<t<<"\t"<<eAverage<<"\t"<<e2Average<<"\t"<<rseed<<endl;
 
     return 0;
 
