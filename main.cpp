@@ -23,7 +23,8 @@ static default_random_engine generator;
 #define nemax (4*N)
 
 static int rseed = 1;
-static unsigned long long int mcSteps = N*3000;
+static unsigned long long int heatupMcSteps = 3000;
+static unsigned long long int mcSteps = 400000;
 static double t=0.001;
 static int energy;
 static double eAverage=0,e2Average=0;
@@ -62,15 +63,23 @@ struct postype {
 struct simpleEM {
     int E;
     int M;
+    double prob;
+};
+
+struct averageValType {
+    double avgLocE;
+    double avgLocE2;
+    double totalProbability;
+    int minimalEnergy;
 };
 
 static signed char s[N]; // spin values over all system
 static int neigh[N*NEIGHBOURS];
 
-static vector< vector <simpleEM> > states; //access through states[b][i].{E|M}
+static vector< vector <simpleEM> > states; //access through states[b][i].{E|M|prob}
 // where b is bit-typed configuration of border, i - sequential configuration of kernel;
 
-static vector< int > minimalEnergies; // array of minimal energies of kernel grouped by border.
+static vector< averageValType > coreAverages; // array of minimal energies of kernel grouped by border.
 
 static vector<pairtype> pairmask; // mask for all pair interactions counting from top left corner of core spin
 static postype borderpos[BORDER_N];
@@ -90,7 +99,7 @@ inline int block_idx(int _i, int _j){return _i*BORDER_L+_j;}
 inline int block_geti(int _n){return _n/BORDER_L;}
 inline int block_getj(int _n){return _n%BORDER_L;}
 
-void mc();
+void mc(unsigned long long int );
 void step();
 void single();
 void showLocSys(signed char *locs, size_t LL);
@@ -154,7 +163,7 @@ void gatherConf(){
     const int borderConfigMax=1<<BORDER_N, kernelConfigMax=1<<KERNEL_N;
 
     states.resize(borderConfigMax);
-    minimalEnergies.resize(borderConfigMax,99999);
+    coreAverages.resize(borderConfigMax,{0,0,0,99999});
 
     signed char locs[BLOCK_N]; // local lattice of spins, with borders
 
@@ -199,12 +208,29 @@ void gatherConf(){
             tempE *= -J;
 
             //add value to dataset
-            states[borderConfigNum][kernelConfigNum] = {tempE,tempM};
+            states[borderConfigNum][kernelConfigNum] = {tempE,tempM,0};
 
             // store the minimal energy
-            if (tempE < minimalEnergies[borderConfigNum])
-                minimalEnergies[borderConfigNum] = tempE;
+            if (tempE < coreAverages[borderConfigNum].minimalEnergy)
+                coreAverages[borderConfigNum].minimalEnergy = tempE;
         }
+
+        // calc thermal averages
+        for ( kernelConfigNum=0; kernelConfigNum < kernelConfigMax; ++kernelConfigNum ){
+            states[borderConfigNum][kernelConfigNum].prob =
+                    exp(-(states[borderConfigNum][kernelConfigNum].E-coreAverages[borderConfigNum].minimalEnergy)/t);
+
+            coreAverages[borderConfigNum].totalProbability += states[borderConfigNum][kernelConfigNum].prob;
+
+            coreAverages[borderConfigNum].avgLocE += states[borderConfigNum][kernelConfigNum].E*
+                                                     states[borderConfigNum][kernelConfigNum].prob;
+
+            coreAverages[borderConfigNum].avgLocE2 += states[borderConfigNum][kernelConfigNum].E*
+                                                      states[borderConfigNum][kernelConfigNum].E*
+                                                      states[borderConfigNum][kernelConfigNum].prob;
+        }
+        coreAverages[borderConfigNum].avgLocE /= coreAverages[borderConfigNum].totalProbability;
+        coreAverages[borderConfigNum].avgLocE2 /= coreAverages[borderConfigNum].totalProbability;
     }
 }
 
@@ -276,7 +302,7 @@ void showLocSys(signed char *locs, size_t LL){
     cout<<"=============================="<<endl;
 }
 
-void mc()
+void mc(unsigned long long int steps=1)
 /*
         monte carlo update
 */
@@ -286,17 +312,15 @@ void mc()
     uint totalKernelConfigs=1<<KERNEL_N;
 
     int coreI, coreJ;
-    size_t coreSpin;
-    uniform_int_distribution<size_t> selectSpinRandom(0,N-1);
+    int coreSpin;
+    uniform_int_distribution<int> selectSpinRandom(0,N-1);
 
     uint kernelConfigNum;
 
-    double *probs = new double[totalKernelConfigs];
-
-    for( n = 0; n <= mcSteps; ++n){
+    for( n = 0; n <= steps; ++n){
 
 
-        int eShift=0, i=0;
+        int eShift=0;
 
         coreSpin = selectSpinRandom(generator);
         coreI = geti(coreSpin);
@@ -316,68 +340,32 @@ void mc()
         }*/
 
         //строим локальную статсумму
-        double eAverageLoc=0,e2AverageLoc=0, eAverageLocGlob=0, e2AverageLocGlob=0;//попутно считаем средние параметры
-        double probsSumm=0;
-        for (uint kernelConfigNum=0; kernelConfigNum<totalKernelConfigs; ++kernelConfigNum){
-            probs[kernelConfigNum] = exp(-(states[borderConfig][kernelConfigNum].E-minimalEnergies[borderConfig])/t);
-            probsSumm += probs[kernelConfigNum];
+        double eAverageLocGlob=0, e2AverageLocGlob=0;//попутно считаем средние параметры
 
-            eAverageLoc += states[borderConfig][kernelConfigNum].E*probs[kernelConfigNum];
-            e2AverageLoc += states[borderConfig][kernelConfigNum].E*states[borderConfig][kernelConfigNum].E*probs[kernelConfigNum];
-        }
-        eAverageLoc  /= probsSumm;
-        e2AverageLoc /= probsSumm;
-
-        eAverageLocGlob  = eShift + eAverageLoc;
-        e2AverageLocGlob = eShift*eShift + 2*eShift*eAverageLoc + e2AverageLoc;
+        eAverageLocGlob  = eShift + coreAverages[borderConfig].avgLocE;
+        e2AverageLocGlob = eShift*eShift + 2*eShift*coreAverages[borderConfig].avgLocE + coreAverages[borderConfig].avgLocE2;
 
 
         // Update total averages (sliding average value)
-        eAverage  = eAverage  + (eAverageLocGlob  - eAverage )/(n+1);
-        e2Average = e2Average + (e2AverageLocGlob - e2Average)/(n+1);
+        eAverage  += (eAverageLocGlob  - eAverage )/(n+1);
+        e2Average += (e2AverageLocGlob - e2Average)/(n+1);
 
 
 
         // выбираем нового кандидата
-        uniform_real_distribution<double> realDistribution(0,probsSumm);
+        uniform_real_distribution<double> realDistribution(0,coreAverages[borderConfig].totalProbability);
         double rval = realDistribution(generator);
         double tval=0;
         for (kernelConfigNum=0; kernelConfigNum<totalKernelConfigs; ++kernelConfigNum){
-            if (rval>=tval && rval<tval+probs[kernelConfigNum]){
+            if (rval>=tval && rval<tval+states[borderConfig][kernelConfigNum].prob){
                 break;
             } else {
-                tval+=probs[kernelConfigNum];
+                tval+=states[borderConfig][kernelConfigNum].prob;
             }
         }
         setKernelConf(kernelConfigNum,coreI,coreJ);
         energy = eShift+states[borderConfig][kernelConfigNum].E;
-
-
-        /*
-        //сперва выбрали энергию согласно вероятности
-        uniform_real_distribution<double> realDistribution(0,probsSumm);
-        double rval = realDistribution(generator);
-        double tval=0;
-        size_t currEGroup;
-        for (currEGroup=0; currEGroup<states[borderConfig].size(); ++currEGroup){
-            if (rval>=tval && rval<tval+probs[currEGroup]){
-                break;
-            } else {
-                tval+=probs[currEGroup];
-            }
-        }
-        if (currEGroup==states[borderConfig].size()){
-            cout<<"ERROR! None of energies were choosen due to randomness, check this place!"<<endl;
-            currEGroup-=1;
-        }
-
-        //затем выбираем одну конфигурацию из группы и применяем её
-        uniform_int_distribution<size_t> intDistribution(0,states[borderConfig][currEGroup].states.size()-1);
-        setKernelConf(states[borderConfig][currEGroup].states[intDistribution(generator)],coreI,coreJ);
-
-        energy = eShift+states[borderConfig][currEGroup].E;*/
     }
-    delete[] probs;
 }
 
 int main(int argc, char *argv[])
@@ -405,7 +393,10 @@ int main(int argc, char *argv[])
 
     //cout<<"mask created"<<endl;
     //cout<<energy<<endl;
-    mc();
+    mc(heatupMcSteps*N);
+    eAverage=0;
+    e2Average=0;
+    mc(mcSteps*N);
 
     cout<<t<<"\t"<<eAverage<<"\t"<<e2Average<<"\t"<<rseed<<endl;
 
