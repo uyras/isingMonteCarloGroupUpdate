@@ -6,9 +6,10 @@
 #include <fstream>
 #include <random>
 #include <bitset>
+#include <gmpxx.h>
 
 using namespace std;
-static default_random_engine generator;
+static mt19937_64 generator;
 
 #define L 100
 #define N L*L
@@ -27,7 +28,7 @@ static unsigned long long int heatupMcSteps = 3000;
 static unsigned long long int mcSteps = 400000;
 static double t=0.001;
 static int energy;
-static double eAverage=0,e2Average=0;
+static mpf_class eAverage,e2Average;
 
 
 struct EMtype {
@@ -347,8 +348,8 @@ void mc(unsigned long long int steps=1)
 
 
         // Update total averages (sliding average value)
-        eAverage  += (eAverageLocGlob  - eAverage )/(n+1);
-        e2Average += (e2AverageLocGlob - e2Average)/(n+1);
+        eAverage  += eAverageLocGlob;
+        e2Average += e2AverageLocGlob;
 
 
 
@@ -393,10 +394,16 @@ int main(int argc, char *argv[])
 
     //cout<<"mask created"<<endl;
     //cout<<energy<<endl;
+    eAverage = 0;
+    e2Average = 0;
     mc(heatupMcSteps*N);
-    eAverage=0;
-    e2Average=0;
+    eAverage = 0;
+    e2Average = 0;
     mc(mcSteps*N);
+    mpz_class mcSetps2 = ulong(mcSteps);
+    mcSetps2 *= N;
+    eAverage /= mcSetps2;
+    e2Average /= mcSetps2;
 
     cout<<t<<"\t"<<eAverage<<"\t"<<e2Average<<"\t"<<rseed<<endl;
 
