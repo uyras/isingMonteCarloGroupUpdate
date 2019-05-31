@@ -6,3 +6,4 @@ CONFIG -= qt
 SOURCES += \
         main.cpp
 
+LIBS +=  -lgmpxx -lgmp
