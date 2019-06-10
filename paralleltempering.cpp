@@ -97,9 +97,9 @@ void mc(unsigned long long steps)
             }
 
             if (prob(generator)<0.5){
-                replica2=replica+1;
-                if (replica2 < REPLICAS){
-                    P = exp((B[replica]-B[replica2])*(E[replica]-E[replica2]));
+                replica2=replica-1;
+                if (replica2 > 0){
+                    P = exp((B[replica2]-B[replica])*(E[replica2]-E[replica]));
                     P1 = prob(generator);
                     if (P1 < P){
                         s[replica].swap(s[replica2]);
