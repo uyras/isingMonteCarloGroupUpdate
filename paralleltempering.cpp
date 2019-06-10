@@ -3,27 +3,28 @@
 #include <cmath>
 #include <vector>
 #include <random>
-#include <string>
 
 using namespace std;
 
-typedef unsigned int uint;
-
 static default_random_engine generator;
 
-static uint L = 100;
+// setup variables
+#define L 100
+#define REPLICAS 10
 static int J = -1;
-static uint n;
-static int E;
-static double T;
+static unsigned long long int heatupMcSteps = 3000; //number of steps to heatup
+static unsigned long long int mcSteps = 4000; //number of steps to perform monte-carlo
 
-static unsigned long long int heatupMcSteps = 30000;
-static unsigned long long int mcSteps = 400000;
 
-static double sumSqr = 0, sum2Sqr = 0;
-
-static vector<int> s, sMin;
-static vector<uint> neigh;
+// global variables
+static uint N; //number of spins
+static double eAvg = 0, e2Avg = 0; //averages
+static double tMin, tMax; // temperatures for calculating B
+static double B[REPLICAS]; // inverse temperatures for every replica
+static int E[REPLICAS]; //local energy for every replica
+static vector< vector<signed char> > s; //arrray of systems for each replica
+static vector<uint> neigh; // array of neighbours
+static vector<unsigned long long int> swapscount;
 
 inline uint idx(const uint i, const uint j) { return i * L + j; }
 inline uint getI(const uint idx) { return idx / L; }
@@ -31,141 +32,158 @@ inline uint getJ(const uint idx) { return idx % L; }
 
 inline uint PBC(const int i)
 {
-	if (i < 0) {
+    if (i < 0) {
         return L + uint(i);
-	}
+    }
     else if (i >= int(L)) {
         return uint(i) - L;
-	}
-	else {
+    }
+    else {
         return uint(i);
-	}
+    }
 }
 
-int calcE() 
+int calcE(size_t replica)
 {
-	E = 0;
-    for (size_t i = 0; i < size_t(n); ++i) {
-		E += -J * s[i] * s[neigh[i * 4 + 0]];
-		E += -J * s[i] * s[neigh[i * 4 + 1]];
-	}
-	return E;
+    int E = 0;
+    for (size_t i = 0; i < size_t(N); ++i) {
+        E += -J * s[replica][i] * s[replica][neigh[i * 4 + 0]];
+        E += -J * s[replica][i] * s[replica][neigh[i * 4 + 1]];
+    }
+    return E;
 }
 
-bool next() 
+void mc(unsigned long long steps)
 {
-    for (size_t i = 0; i < size_t(n); ++i) {
-		if (s[i] < 0) {
-			s[i] *= -1;
-			return true;
-		}
-		if (s[i] > 0)
-			s[i] *= -1;
-	}
-	return false;
+    int eTemp;
+    size_t cand,replica2;
+    double P1, P;
+
+    uniform_int_distribution<size_t> intrand(0, N - 1);
+    uniform_real_distribution<double> prob(0, 1);
+
+    eTemp = calcE(0);
+    for (size_t replica = 0; replica < REPLICAS; ++replica){
+        E[replica] = eTemp; //same configs on all replicas
+    }
+
+
+    for (unsigned long long step = 0; step < steps; ++step)
+    {
+        for (size_t replica = 0; replica < REPLICAS; ++replica){
+
+            cand = intrand(generator);
+
+            eTemp = J * 2 * s[replica][cand] * (
+                s[replica][neigh[cand * 4 + 0]] +
+                s[replica][neigh[cand * 4 + 1]] +
+                s[replica][neigh[cand * 4 + 2]] +
+                s[replica][neigh[cand * 4 + 3]]
+                );
+
+            P = exp(-(eTemp) * B[replica]);
+            P1 = prob(generator);
+
+            if (P1 < P) {
+                s[replica][cand] *= -1;
+                E[replica] += eTemp;
+            }
+
+
+            if (replica==0){
+                //сумма квадратов скользящего среднего значения Е
+                eAvg += (E[replica] - eAvg)/double(step + 1);
+                e2Avg += (E[replica]*E[replica] - e2Avg) / double(step +1);
+            }
+
+            if (prob(generator)<0.5){
+                replica2=replica+1;
+                if (replica2 < REPLICAS){
+                    P = exp((B[replica]-B[replica2])*(E[replica]-E[replica2]));
+                    P1 = prob(generator);
+                    if (P1 < P){
+                        s[replica].swap(s[replica2]);
+                        swap(E[replica],E[replica2]);
+                        ++swapscount[replica];
+                    }
+                }
+            }
+        }
+    }
 }
 
-void mc(unsigned long long steps ){
-
-
-    uniform_int_distribution<size_t> intrand(0, n - 1);
-	uniform_real_distribution<double> prob(0, 1);
-
-
-	int eOld = calcE();
-
-    int eNew;
-    size_t cand;
-	double P1, P;
-
-	for (unsigned long long step = 0; step < steps; ++step)
-	{
-		
-		/*if (step % n == 0)
-		{
-			for (int i = 0; i < n - 1; ++i)
-			{
-				f << ((s[i] < 0) ? "-1," : "1,");
-			}
-			f << ((s[n - 1] < 0) ? "-1" : "1");
-			f << endl;
-		}*/
-
-		cand = intrand(generator);
-
-		eNew = eOld + J * 2 * s[cand] * (
-			s[neigh[cand * 4 + 0]] +
-			s[neigh[cand * 4 + 1]] +
-			s[neigh[cand * 4 + 2]] +
-			s[neigh[cand * 4 + 3]]
-			);
-
-		P = exp(-(eNew - eOld) / T);
-		P1 = prob(generator);
-
-        if (P1 < P) {
-			s[cand] *= -1;
-			eOld = eNew;
-		}
-
-
-		//сумма квадратов скользящего среднего значения Е
-		sumSqr += (eOld - sumSqr)/double(step + 1);
-		sum2Sqr += (eOld*eOld - sum2Sqr) / double(step +1);
-
-	}
-}
-
-int main(int argc, char *argv[]) 
+int main(int argc, char *argv[])
 {
-	if (argc!=3){
+    if (argc!=4){
         cout<<"error reading console parameters."<<endl;
         cout<<"The format is as follows:"<<endl;
-        cout<<argv[0]<<" <T> <rseed>"<<endl;
+        cout<<argv[0]<<" <T> <Tmax> <rseed>"<<endl;
         cout<<"\t<T> - temperature, real number (>0 and <10)"<<endl;
+        cout<<"\t<Tmax> - maximal temperature, real number (>T and <15)"<<endl;
         cout<<"\t<rseed> - random seed, integer (>1)"<<endl;
         return 0;
     }
-    T = stod(argv[1]);
-    uint rseed = uint(stoi(argv[2]));
 
-	generator.seed(rseed);
+    // init seed
+    uint rseed = uint(stoi(argv[3]));
+    generator.seed(rseed);
 
-	n = L * L;
-	
-	s.resize(n, -1);
+    //init temperatures array
+    tMin = stod(argv[1]);
+    tMax = stod(argv[2]);
 
-	sMin.resize(n, -1);
-	neigh.resize(n * 4);
+    N = L * L;
+
+    for (size_t i=0; i<REPLICAS; ++i){ // inverse temperature as power function
+        B[i] = 1./(pow(tMax/tMin,i/(double(REPLICAS-1)))*tMin);
+    }
+
+    s.resize(REPLICAS);
+    for (size_t i=0; i<REPLICAS; ++i){ // inverse temperature as power function
+        s[i].resize(N,-1);
+    }
+
+    neigh.resize(N * 4);
 
     for (uint i = 0; i < L; ++i)
     {
         for (uint j = 0; j < L; ++j)
-		{
+        {
             uint index = idx(i, j);
             neigh[index * 4 + 0] = idx(PBC(int(i) - 1), PBC(int(j)));
             neigh[index * 4 + 1] = idx(PBC(int(i)), PBC(int(j) + 1));
             neigh[index * 4 + 2] = idx(PBC(int(i) + 1), PBC(int(j)));
             neigh[index * 4 + 3] = idx(PBC(int(i)), PBC(int(j) - 1));
-			
-			if ((i % 2) ^ (j % 2))
-			{
-				s[index] = -1;
-			}
-			else
-			{
-				s[index] = +1;
-			}
-		}
-	}
 
-	sumSqr=0; sum2Sqr=0;
-	mc(heatupMcSteps*n);
+            //set all replicas to ground states
+            for (size_t i=0; i<REPLICAS; ++i){
+                if ((i % 2) ^ (j % 2))
+                    s[i][index] = -1;
+                else
+                    s[i][index] = +1;
+            }
+        }
+    }
 
-	sumSqr=0; sum2Sqr=0;
-	mc(mcSteps*n);
+    swapscount.resize(REPLICAS,0);
+    eAvg=0; e2Avg=0;
+    mc(heatupMcSteps*N);
+    //cout<<"swaps before resize: ";
+    for (size_t i=0; i<REPLICAS; ++i){
+        //cout<<swapscount[i]/double(heatupMcSteps*N)<<"; ";
+        swapscount[i]=0;
+    }
+    //cout<<endl;
 
-	cout << T <<"\t" << sumSqr << "\t" << sum2Sqr << endl;
+    eAvg=0; e2Avg=0;
+    mc(mcSteps*N);
+    /*cout<<"swaps after resize: ";
+    for (size_t i=0; i<L; ++i){
+        cout<<swapscount[i]/double(mcSteps*N)<<"; ";
+    }
+    cout<<endl;*/
 
-	return 0;
+    cout << tMin <<"\t" << eAvg << "\t" << e2Avg << endl;
+
+    return 0;
 }
