@@ -10,10 +10,10 @@ static default_random_engine generator;
 
 // setup variables
 #define L 100
-#define REPLICAS 10
+#define REPLICAS 5
 static int J = -1;
-static unsigned long long int heatupMcSteps = 3000; //number of steps to heatup
-static unsigned long long int mcSteps = 4000; //number of steps to perform monte-carlo
+static unsigned long long int heatupMcSteps = 300; //number of steps to heatup
+static unsigned long long int mcSteps = 400; //number of steps to perform monte-carlo
 
 
 // global variables
@@ -21,6 +21,8 @@ static uint N; //number of spins
 static double eAvg = 0, e2Avg = 0; //averages
 static double tMin, tMax; // temperatures for calculating B
 static double B[REPLICAS]; // inverse temperatures for every replica
+static size_t BConnections[REPLICAS]; //connection between temperature and replica number
+//for example, BConnections[1]=3 means that temperature B[1] is assigned to s[3] replica
 static int E[REPLICAS]; //local energy for every replica
 static vector< vector<signed char> > s; //arrray of systems for each replica
 static vector<uint> neigh; // array of neighbours
@@ -56,21 +58,18 @@ int calcE(size_t replica)
 void mc(unsigned long long steps)
 {
     int eTemp;
-    size_t cand,replica2;
+    size_t cand,replica,replica2;
     double P1, P;
 
     uniform_int_distribution<size_t> intrand(0, N - 1);
     uniform_real_distribution<double> prob(0, 1);
 
-    eTemp = calcE(0);
-    for (size_t replica = 0; replica < REPLICAS; ++replica){
-        E[replica] = eTemp; //same configs on all replicas
-    }
-
-
     for (unsigned long long step = 0; step < steps; ++step)
     {
-        for (size_t replica = 0; replica < REPLICAS; ++replica){
+        // canonical MC step for every replica
+        for (size_t BNum = 0; BNum < REPLICAS; ++BNum){
+
+            replica = BConnections[BNum];
 
             cand = intrand(generator);
 
@@ -81,7 +80,7 @@ void mc(unsigned long long steps)
                 s[replica][neigh[cand * 4 + 3]]
                 );
 
-            P = exp(-(eTemp) * B[replica]);
+            P = exp(-(eTemp) * B[BNum]);
             P1 = prob(generator);
 
             if (P1 < P) {
@@ -90,23 +89,30 @@ void mc(unsigned long long steps)
             }
 
 
-            if (replica==0){
+            if (BNum==0){
                 //сумма квадратов скользящего среднего значения Е
                 eAvg += (E[replica] - eAvg)/double(step + 1);
                 e2Avg += (E[replica]*E[replica] - e2Avg) / double(step +1);
             }
+        }
 
-            if (prob(generator)<0.5){
-                replica2=replica-1;
-                if (replica2 > 0){
-                    P = exp((B[replica2]-B[replica])*(E[replica2]-E[replica]));
-                    P1 = prob(generator);
-                    if (P1 < P){
-                        s[replica].swap(s[replica2]);
-                        swap(E[replica],E[replica2]);
-                        ++swapscount[replica];
-                    }
-                }
+        // PT exchange step
+        for (size_t BNum = 1; BNum < REPLICAS; ++BNum){
+            replica=BConnections[BNum-1];
+            replica2 = BConnections[BNum];
+            P = exp((B[BNum-1]-B[BNum])*(E[replica]-E[replica2]));
+            P1 = prob(generator);
+            if (P1 < P){
+                swap(BConnections[BNum],BConnections[BNum-1]);
+                ++swapscount[BNum];
+            }
+        }
+
+        //check myself
+        if (step==10000){
+            for (replica = 0; replica < REPLICAS; ++replica){
+                if (E[replica]!=calcE(replica))
+                    cout<<replica<<": "<<E[replica]<<"!="<<calcE(replica)<<endl;
             }
         }
     }
@@ -131,11 +137,23 @@ int main(int argc, char *argv[])
     //init temperatures array
     tMin = stod(argv[1]);
     tMax = stod(argv[2]);
+    tMin=0.001;
+    tMax=4;
 
     N = L * L;
 
-    for (size_t i=0; i<REPLICAS; ++i){ // inverse temperature as power function
+    /*for (size_t i=0; i<REPLICAS; ++i){ // inverse temperature as power function
         B[i] = 1./(pow(tMax/tMin,i/(double(REPLICAS-1)))*tMin);
+        BConnections[i] = i;
+    }*/
+
+   double bb[] = {
+       0.1       , 0.13233333, 0.22933333, 0.391     , 0.61733333,
+              0.90833333, 1.264     , 1.68433333, 2.16933333, 2.719
+    };
+    for (size_t i=0; i<REPLICAS; ++i){ // inverse temperature as power function
+           B[i] = 1./bb[i];
+           BConnections[i] = i;
     }
 
     s.resize(REPLICAS);
@@ -149,6 +167,7 @@ int main(int argc, char *argv[])
     {
         for (uint j = 0; j < L; ++j)
         {
+            //fill the array of neighbours for square lattice, with PBC
             uint index = idx(i, j);
             neigh[index * 4 + 0] = idx(PBC(int(i) - 1), PBC(int(j)));
             neigh[index * 4 + 1] = idx(PBC(int(i)), PBC(int(j) + 1));
@@ -156,13 +175,19 @@ int main(int argc, char *argv[])
             neigh[index * 4 + 3] = idx(PBC(int(i)), PBC(int(j) - 1));
 
             //set all replicas to ground states
-            for (size_t i=0; i<REPLICAS; ++i){
+            for (size_t k=0; k<REPLICAS; ++k){
                 if ((i % 2) ^ (j % 2))
-                    s[i][index] = -1;
+                    s[k][index] = -1;
                 else
-                    s[i][index] = +1;
+                    s[k][index] = +1;
             }
         }
+    }
+
+    //calc initial energies for replicas
+    int eTemp = calcE(0);
+    for (size_t replica = 0; replica < REPLICAS; ++replica){
+        E[replica] = eTemp; //same configs on all replicas
     }
 
     swapscount.resize(REPLICAS,0);
@@ -183,7 +208,13 @@ int main(int argc, char *argv[])
     }
     cout<<endl;*/
 
-    cout << tMin <<"\t" << eAvg << "\t" << e2Avg << endl;
+    cout << 1./B[0] <<"\t" << eAvg << "\t" << e2Avg << "\t" << rseed << endl;
+
+    //check myself again
+    cout<<"# Acceptance rates:"<<endl;
+    for (size_t i=0; i<REPLICAS; ++i){
+        cout<<"# "<<1./B[i]<<"J:"<< swapscount[i]/double(mcSteps*N) <<"; "<<endl;;
+    }
 
     return 0;
 }
