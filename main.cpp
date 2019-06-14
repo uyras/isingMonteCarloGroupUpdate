@@ -11,7 +11,7 @@
 using namespace std;
 static mt19937_64 generator;
 
-#define L 100
+#define L 1000
 #define N L*L
 #define NEIGHBOURS 4
 #define KERNEL_L 3 // linear size of core
@@ -21,13 +21,12 @@ static mt19937_64 generator;
 #define BLOCK_N (BORDER_L*BORDER_L) // total spinsin kernel + in border, plus 4 unused spins in edge
 #define J 1
 
-#define nemax (4*N)
-
 static int rseed = 1;
-static unsigned long long int heatupMcSteps = 3000;
-static unsigned long long int mcSteps = 400000;
+static unsigned long heatupMcSteps = 5000;
+static unsigned long mcSteps = 100000;
+static unsigned long dumpEvery = 100;
 static double t=0.001;
-static int energy;
+static long long energy;
 static mpf_class eAverage,e2Average;
 
 
@@ -100,10 +99,20 @@ inline int block_idx(int _i, int _j){return _i*BORDER_L+_j;}
 inline int block_geti(int _n){return _n/BORDER_L;}
 inline int block_getj(int _n){return _n%BORDER_L;}
 
-void mc(unsigned long long int );
+void mc(unsigned long , unsigned long);
 void step();
 void single();
 void showLocSys(signed char *locs, size_t LL);
+
+void showHeader(){
+    cout<<"# 1 Hybird Metropolis method for Square Ising System"<<endl<<
+          "# 2 System size L="<<L<<"; N="<<N<<endl<<
+          "# 3 Kernel size KERNEL_L="<<KERNEL_L<<"; KERNEL_N="<<KERNEL_N<<endl<<
+          "# 4 Exchange integral J="<<J<<endl<<
+          "# 5 MC Steps. Heatup="<<heatupMcSteps<<"; Main="<<mcSteps<<endl<<
+          "# 6 T\t<E>\t<E^2>\tstep\tseed"<<endl;
+    cout.flush();
+}
 
 void spinset(){
     int index = 0;
@@ -303,12 +312,12 @@ void showLocSys(signed char *locs, size_t LL){
     cout<<"=============================="<<endl;
 }
 
-void mc(unsigned long long int steps=1)
+void mc(unsigned long steps, unsigned long dumpEvery)
 /*
         monte carlo update
 */
 {
-    unsigned long long int n;
+    unsigned long n, spin;
 
     uint totalKernelConfigs=1<<KERNEL_N;
 
@@ -318,54 +327,62 @@ void mc(unsigned long long int steps=1)
 
     uint kernelConfigNum;
 
-    for( n = 0; n <= steps; ++n){
+    for( n = 1; n <= steps; ++n){
+        for (spin=1; spin<=N; ++spin){
+
+            long long eShift=0;
+
+            coreSpin = selectSpinRandom(generator);
+            coreI = geti(coreSpin);
+            coreJ = getj(coreSpin);
+
+            // get configurations of kernel and border
+            uint oldKernelConfig=getKernelConf(coreI,coreJ);
+            uint borderConfig = getBorderConf(coreI,coreJ);
 
 
-        int eShift=0;
-
-        coreSpin = selectSpinRandom(generator);
-        coreI = geti(coreSpin);
-        coreJ = getj(coreSpin);
-
-        // get configurations of kernel and border
-        uint oldKernelConfig=getKernelConf(coreI,coreJ);
-        uint borderConfig = getBorderConf(coreI,coreJ);
+            eShift = energy - states[borderConfig][oldKernelConfig].E;
 
 
-        eShift = energy - states[borderConfig][oldKernelConfig].E;
+            /*energyset();
+            if (eShift+currE->E != energy){
+                cout<<"E error again~!"<<endl;
+            }*/
+
+            //строим локальную статсумму
+            double eAverageLocGlob=0, e2AverageLocGlob=0;//попутно считаем средние параметры
+
+            eAverageLocGlob  = eShift + coreAverages[borderConfig].avgLocE;
+            e2AverageLocGlob = eShift*eShift + 2*eShift*coreAverages[borderConfig].avgLocE + coreAverages[borderConfig].avgLocE2;
 
 
-        /*energyset();
-        if (eShift+currE->E != energy){
-            cout<<"E error again~!"<<endl;
-        }*/
-
-        //строим локальную статсумму
-        double eAverageLocGlob=0, e2AverageLocGlob=0;//попутно считаем средние параметры
-
-        eAverageLocGlob  = eShift + coreAverages[borderConfig].avgLocE;
-        e2AverageLocGlob = eShift*eShift + 2*eShift*coreAverages[borderConfig].avgLocE + coreAverages[borderConfig].avgLocE2;
-
-
-        // Update total averages (sliding average value)
-        eAverage  += eAverageLocGlob;
-        e2Average += e2AverageLocGlob;
-
-
-
-        // выбираем нового кандидата
-        uniform_real_distribution<double> realDistribution(0,coreAverages[borderConfig].totalProbability);
-        double rval = realDistribution(generator);
-        double tval=0;
-        for (kernelConfigNum=0; kernelConfigNum<totalKernelConfigs; ++kernelConfigNum){
-            if (rval>=tval && rval<tval+states[borderConfig][kernelConfigNum].prob){
-                break;
-            } else {
-                tval+=states[borderConfig][kernelConfigNum].prob;
+            // Update total averages
+            if (dumpEvery!=0){
+                eAverage  += eAverageLocGlob;
+                e2Average += e2AverageLocGlob;
             }
+
+
+
+            // выбираем нового кандидата
+            uniform_real_distribution<double> realDistribution(0,coreAverages[borderConfig].totalProbability);
+            double rval = realDistribution(generator);
+            double tval=0;
+            for (kernelConfigNum=0; kernelConfigNum<totalKernelConfigs; ++kernelConfigNum){
+                if (rval>=tval && rval<tval+states[borderConfig][kernelConfigNum].prob){
+                    break;
+                } else {
+                    tval+=states[borderConfig][kernelConfigNum].prob;
+                }
+            }
+            setKernelConf(kernelConfigNum,coreI,coreJ);
+            energy = eShift+states[borderConfig][kernelConfigNum].E;
         }
-        setKernelConf(kernelConfigNum,coreI,coreJ);
-        energy = eShift+states[borderConfig][kernelConfigNum].E;
+
+        if (dumpEvery>0 && (n%dumpEvery==0 || n==steps)){
+            cout << t <<"\t"<< eAverage / spin / n <<"\t"<< e2Average / spin / n << "\t" << n <<"\t"<<rseed<<endl;
+            cout.flush();
+        }
     }
 }
 
@@ -378,10 +395,13 @@ int main(int argc, char *argv[])
         cout<<argv[0]<<" <T> <rseed>"<<endl;
         cout<<"\t<T> - temperature, real number (>0 and <10)"<<endl;
         cout<<"\t<rseed> - random seed, integer (>1)"<<endl;
+        cout.flush();
         return 0;
     }
     t = stod(argv[1]);
     rseed = stoi(argv[2]);
+
+    showHeader();
 
 
     generator.seed(rseed);
@@ -396,16 +416,11 @@ int main(int argc, char *argv[])
     //cout<<energy<<endl;
     eAverage = 0;
     e2Average = 0;
-    mc(heatupMcSteps*N);
+    mc(heatupMcSteps, 0);
+
     eAverage = 0;
     e2Average = 0;
-    mc(mcSteps*N);
-    mpz_class mcSetps2 = ulong(mcSteps);
-    mcSetps2 *= N;
-    eAverage /= mcSetps2;
-    e2Average /= mcSetps2;
-
-    cout<<t<<"\t"<<eAverage<<"\t"<<e2Average<<"\t"<<rseed<<endl;
+    mc(mcSteps, dumpEvery);
 
     return 0;
 
