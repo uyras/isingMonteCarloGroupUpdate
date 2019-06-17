@@ -1,4 +1,5 @@
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -22,32 +23,14 @@ static mt19937_64 generator;
 #define J 1
 
 static int rseed = 1;
-static unsigned long heatupMcSteps = 5000;
-static unsigned long mcSteps = 100000;
-static unsigned long dumpEvery = 100;
+static unsigned long heatupMcSteps = 25000;
+static unsigned long mcSteps = 1000000;
+static unsigned long dumpEvery = 1000;
 static double t=0.001;
-static long long energy;
-static mpf_class eAverage,e2Average;
+static long long energy, magnetisation;
+static mpf_class eAverage,e2Average,mAverage,m2Average;
+static unsigned long NN = L*L; // additional variable, needed for GMP
 
-
-struct EMtype {
-    int E;
-    int M;
-    vector <uint> states;
-
-    EMtype(int e, int m): E(e), M(m){}
-    EMtype(int e, int m, uint s): E(e), M(m){states.push_back(s);}
-    inline bool operator==(const EMtype &a) const {return E==a.E&&M==a.M;}
-};
-
-struct Etype {
-    int E;
-    vector <uint> states;
-
-    Etype(int e): E(e){}
-    Etype(int e, uint s): E(e) {states.push_back(s);}
-    inline bool operator==(const Etype &a) const {return E==a.E;}
-};
 
 struct pairtype {
     int ai;
@@ -69,6 +52,8 @@ struct simpleEM {
 struct averageValType {
     double avgLocE;
     double avgLocE2;
+    double avgLocM;
+    double avgLocM2;
     double totalProbability;
     int minimalEnergy;
 };
@@ -110,7 +95,7 @@ void showHeader(){
           "# 3 Kernel size KERNEL_L="<<KERNEL_L<<"; KERNEL_N="<<KERNEL_N<<endl<<
           "# 4 Exchange integral J="<<J<<endl<<
           "# 5 MC Steps. Heatup="<<heatupMcSteps<<"; Main="<<mcSteps<<endl<<
-          "# 6 T\t<E>\t<E^2>\tstep\tseed"<<endl;
+          "# 6 T\t<E>\t<E^2>\t<M>\t<M^2>\tstep\tseed"<<endl;
     cout.flush();
 }
 
@@ -173,7 +158,7 @@ void gatherConf(){
     const int borderConfigMax=1<<BORDER_N, kernelConfigMax=1<<KERNEL_N;
 
     states.resize(borderConfigMax);
-    coreAverages.resize(borderConfigMax,{0,0,0,99999});
+    coreAverages.resize(borderConfigMax,{0,0,0,0,0,99999});
 
     signed char locs[BLOCK_N]; // local lattice of spins, with borders
 
@@ -238,20 +223,39 @@ void gatherConf(){
             coreAverages[borderConfigNum].avgLocE2 += states[borderConfigNum][kernelConfigNum].E*
                                                       states[borderConfigNum][kernelConfigNum].E*
                                                       states[borderConfigNum][kernelConfigNum].prob;
+
+            coreAverages[borderConfigNum].avgLocM += states[borderConfigNum][kernelConfigNum].M*
+                                                     states[borderConfigNum][kernelConfigNum].prob;
+
+            coreAverages[borderConfigNum].avgLocM2 += states[borderConfigNum][kernelConfigNum].M*
+                                                      states[borderConfigNum][kernelConfigNum].M*
+                                                      states[borderConfigNum][kernelConfigNum].prob;
         }
         coreAverages[borderConfigNum].avgLocE /= coreAverages[borderConfigNum].totalProbability;
         coreAverages[borderConfigNum].avgLocE2 /= coreAverages[borderConfigNum].totalProbability;
+        coreAverages[borderConfigNum].avgLocM /= coreAverages[borderConfigNum].totalProbability;
+        coreAverages[borderConfigNum].avgLocM2 /= coreAverages[borderConfigNum].totalProbability;
     }
 }
 
 void energyset(){
     energy = 0;
+    magnetisation=0;
     for (int i=0; i<N; ++i){
         for (int j=0; j<NEIGHBOURS; ++j){
             energy += s[i]*s[neigh[i*NEIGHBOURS+j]];
         }
+        magnetisation+=s[i];
     }
     energy *= J*-0.5;
+}
+
+long calcM(){
+    long tmp=0;
+    for (int i=0; i<N; ++i){
+        tmp+=s[i];
+    }
+    return tmp;
 }
 
 uint getBorderConf(const int di, const int dj){
@@ -320,17 +324,24 @@ void mc(unsigned long steps, unsigned long dumpEvery)
     unsigned long n, spin;
 
     uint totalKernelConfigs=1<<KERNEL_N;
-
     int coreI, coreJ;
     int coreSpin;
     uniform_int_distribution<int> selectSpinRandom(0,N-1);
 
+    double eAverageLocGlob,
+            e2AverageLocGlob,
+            mAverageLocGlob,
+            m2AverageLocGlob;
+
+    long long eShift, mShift;
+
     uint kernelConfigNum;
 
     for( n = 1; n <= steps; ++n){
-        for (spin=1; spin<=N; ++spin){
+        for (spin=1; spin<=NN; ++spin){
 
-            long long eShift=0;
+            eShift=0;
+            mShift=0;
 
             coreSpin = selectSpinRandom(generator);
             coreI = geti(coreSpin);
@@ -342,6 +353,7 @@ void mc(unsigned long steps, unsigned long dumpEvery)
 
 
             eShift = energy - states[borderConfig][oldKernelConfig].E;
+            mShift = magnetisation - states[borderConfig][oldKernelConfig].M;
 
 
             /*energyset();
@@ -349,17 +361,20 @@ void mc(unsigned long steps, unsigned long dumpEvery)
                 cout<<"E error again~!"<<endl;
             }*/
 
-            //строим локальную статсумму
-            double eAverageLocGlob=0, e2AverageLocGlob=0;//попутно считаем средние параметры
-
+            //считаем средние параметры
             eAverageLocGlob  = eShift + coreAverages[borderConfig].avgLocE;
             e2AverageLocGlob = eShift*eShift + 2*eShift*coreAverages[borderConfig].avgLocE + coreAverages[borderConfig].avgLocE2;
+            mAverageLocGlob  = mShift + coreAverages[borderConfig].avgLocM;
+            m2AverageLocGlob = mShift*mShift + 2*mShift*coreAverages[borderConfig].avgLocM + coreAverages[borderConfig].avgLocM2;
 
 
             // Update total averages
             if (dumpEvery!=0){
                 eAverage  += eAverageLocGlob;
                 e2Average += e2AverageLocGlob;
+
+                mAverage  += mAverageLocGlob;
+                m2Average += m2AverageLocGlob;
             }
 
 
@@ -377,10 +392,21 @@ void mc(unsigned long steps, unsigned long dumpEvery)
             }
             setKernelConf(kernelConfigNum,coreI,coreJ);
             energy = eShift+states[borderConfig][kernelConfigNum].E;
+            magnetisation = mShift+states[borderConfig][kernelConfigNum].M;
         }
 
+        // cout<<((calcM()==magnetisation)?"True":"False")<<endl; //chech myself
+
         if (dumpEvery>0 && (n%dumpEvery==0 || n==steps)){
-            cout << t <<"\t"<< eAverage / spin / n <<"\t"<< e2Average / spin / n << "\t" << n <<"\t"<<rseed<<endl;
+            cout << setprecision(15) <<
+                    t <<"\t"<<
+                    eAverage / n / NN / NN <<"\t"<< // n*NN - число МК шагов, еще один NN - число спинов
+                    e2Average / n / NN / NN / NN << "\t" <<
+                    mAverage / n / NN / NN <<"\t"<<
+                    m2Average / n / NN / NN / NN << "\t" <<
+                    n <<"\t"<<
+                    rseed<<
+                    endl;
             cout.flush();
         }
     }
@@ -416,10 +442,14 @@ int main(int argc, char *argv[])
     //cout<<energy<<endl;
     eAverage = 0;
     e2Average = 0;
+    mAverage = 0;
+    m2Average = 0;
     mc(heatupMcSteps, 0);
 
     eAverage = 0;
     e2Average = 0;
+    mAverage = 0;
+    m2Average = 0;
     mc(mcSteps, dumpEvery);
 
     return 0;
